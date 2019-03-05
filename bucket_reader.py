@@ -69,7 +69,6 @@ class AuthManager():
         # NOTE: verify=False is for self-signed SSL certs, NOT FOR PROD
         r = requests.get(url=url, headers=headers, verify=False)
         # TODO: handle errors
-        print('REQUEST', url, headers, r)
         self.gcp_jwt = r.json()['data']['token']
 
 
