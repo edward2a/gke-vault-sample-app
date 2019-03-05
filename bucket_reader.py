@@ -10,23 +10,67 @@ from wsgiref.simple_server import make_server
 
 
 class AuthManager():
+    # TODO: Token expiration tracking
+    # TODO: Token renew prior to expiration
 
-    jwt = None
+    gcp_jwt = None # The one for using GCP services (obtained from Vault)
+    k8s_jwt = None # The one used to login to vault (obtained from k8s)
 
-    def __init__(self):
-        pass
+    k8s_token_path = '/var/run/secrets/kubernetes.io/serviceaccount/token'
+
+    vault_host = None
+    vault_token = None
+    vault_k8s_path = 'auth/kubernetes/login'
+    vault_k8s_role = None
+
+    vault_gcp_path = 'gcp/token'
+    vault_gcp_role = None
+
+    def __init__(self, args):
         # fetch kubernetes secret
         # authenticate against vault
         # request vault role jwt and store it
 
+        self.vault_host = 'https://' + args.vault_host
+        self.vault_k8s_role = args.vault_kube_role
+        self.vault_gcp_role = args.vault_gcp_role
+
+        self.get_container_secret()
+        self.get_vault_auth()
+        self.get_gcp_auth_from_vault()
+
     def get_container_secret(self):
-        pass
+        """Retrive the k8s SA secret from default path."""
+        with open(self.k8s_token_path) as f:
+            self.k8s_jwt = f.read().strip()
 
     def get_vault_auth(self):
-        pass
+        """Authenticate against Vault with k8s SA secret."""
+        data = {
+            "role": self.vault_k8s_role,
+            "jwt": self.k8s_jwt
+        }
+
+        url = '{}/v1/{}'.format(self.vault_host, self.vault_k8s_path)
+
+        # NOTE: verify=False is for self-signed SSL certs, NOT FOR PROD
+        r = requests.post(url=url, verify=False, json=data)
+        # TODO: handle errors
+        self.vault_token = r.json()['auth']['client_token']
 
     def get_gcp_auth_from_vault(self):
-        pass
+        """Get a temporary GCP token from Vault."""
+        url = '{}/v1/{}/{}'.format(self.vault_host, self.vault_gcp_path, self.vault_gcp_role)
+
+        headers = {
+            'X-Vault-Token': self.vault_token
+        }
+
+        # NOTE: verify=False is for self-signed SSL certs, NOT FOR PROD
+        r = requests.get(url=url, headers=headers, verify=False)
+        # TODO: handle errors
+        print('REQUEST', url, headers, r)
+        self.gcp_jwt = r.json()['data']['token']
 
 
 class SyncHandlerGCS():
@@ -72,20 +116,29 @@ class ObjectReader():
                 self.url_constructor(bucket, obj))
 
 
-if __name__ == "__main__":
-
+def get_arguments():
     p = argparse.ArgumentParser()
     p.add_argument('-t', '--token', required=False, default=None,
         help='JWT token - use for troubleshooting')
-    args = p.parse_args()
+    p.add_argument('-v', '--vault-host', required=True,
+        help='Vault endpoint (IP address, no scheme)')
+    p.add_argument('-k', '--vault-kube-role', required=True,
+        help='Vault role for the kubernetes authentication engine')
+    p.add_argument('-g', '--vault-gcp-role', required=True,
+        help='Vault role for the gcp secret engine')
+    return p.parse_args()
+
+if __name__ == "__main__":
+
+    args = get_arguments()
 
     if args.token:
         auth = SimpleNamespace()
-        auth.jwt = args.token
+        auth.gcp_jwt = args.token
     else:
-        auth = AuthManager()
+        auth = AuthManager(args)
 
-    handler = SyncHandlerGCS(auth.jwt)
+    handler = SyncHandlerGCS(auth.gcp_jwt)
 
     api = falcon.API()
     api.add_route('/{bucket}', ObjectReader(handler))
